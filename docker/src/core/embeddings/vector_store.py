@@ -6,7 +6,7 @@ import numpy as np
 from chromadb.config import Settings
 
 class IndonesianVectorEmbeddings:
-    def __init__(self, model_name: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"):
+    def __init__(self, model_name: str = "LazarusNLP/all-indo-e5-small-v4"):
         """
         Initialize Indonesian vector embeddings system
         Using multilingual model that works well with Indonesian text
