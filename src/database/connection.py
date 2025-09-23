@@ -12,13 +12,13 @@ logger = logging.getLogger(__name__)
 
 class DatabaseConnection:
     def __init__(self):
-        self.host = os.getenv('DB_HOST')
-        self.port = int(os.getenv('DB_PORT'))
-        self.database = os.getenv('DB_NAME')
-        self.user = os.getenv('DB_USER',)
+        self.host = os.getenv('DB_HOST', 'localhost')
+        self.port = int(os.getenv('DB_PORT', '5432'))
+        self.database = os.getenv('DB_NAME', 'sentuh_tanahku')
+        self.user = os.getenv('DB_USER', 'postgres')
         self.password = os.getenv('DB_PASSWORD')
-        self.ssl_mode = os.getenv('DB_SSL_MODE')
-        self.connection_timeout = int(os.getenv('DB_CONNECTION_TIMEOUT'))
+        self.ssl_mode = os.getenv('DB_SSL_MODE', 'prefer')
+        self.connection_timeout = int(os.getenv('DB_CONNECTION_TIMEOUT', '30'))
         
         if not self.password:
             raise ValueError("Database password is required. Please set DB_PASSWORD in .env file")
