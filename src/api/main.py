@@ -54,9 +54,9 @@ logging_queue = asyncio.Queue(maxsize=1000)
 
 # Database functions
 async def load_knowledge_from_db():
-    """Load knowledge data from PostgreSQL database"""
+    """Load approved knowledge data from PostgreSQL database"""
     try:
-        return db.get_all_faqs()
+        return db.get_approved_faqs()
     except Exception as e:
         print(f"Warning: Failed to load data from database: {e}")
         return []
@@ -149,9 +149,10 @@ async def root():
             "GET /health - Health check",
             "POST /chat-stream - Dedicated streaming endpoint",
             "POST /query - Query endpoint with consistent response format",
-            "POST /sync - Sync PostgreSQL database data",
-            "POST /add-faq - Add single FAQ entry",
-            "POST /upload-csv - Upload FAQ data from CSV file",
+            "POST /sync - Sync PostgreSQL database data to application memory",
+            "POST /add-faq - Add single FAQ entry to database (requires manual sync)",
+            "POST /upload-csv - Upload FAQ data from CSV file to database (requires manual sync)",
+            "GET /user-queries - View user queries with approval status",
             "GET /data-info - Current data information",
             "GET /suggestions - Get query suggestions",
             "GET /cache-stats - Cache performance stats",
@@ -277,7 +278,7 @@ async def sync_data():
 
 @app.post("/add-faq", response_model=AddFAQResponse)
 async def add_single_faq(request: AddFAQRequest):
-    """Add a single FAQ entry and auto-sync"""
+    """Add a single FAQ entry"""
     try:
         # Add FAQ to database
         faq_id = db.add_faq(request.question, request.answer, request.category)
@@ -285,12 +286,9 @@ async def add_single_faq(request: AddFAQRequest):
         if not faq_id:
             raise HTTPException(status_code=400, detail="Failed to add FAQ to database")
         
-        # Auto-sync after adding
-        await sync_data()
-        
         return AddFAQResponse(
             status="success",
-            message="FAQ added successfully and data synced",
+            message="FAQ added successfully to database",
             faq_id=faq_id,
             question=request.question,
             answer=request.answer,
@@ -370,11 +368,7 @@ async def upload_csv_file(file: UploadFile = File(...), use_fast_method: bool = 
             print("⚡ Using optimized batch processing method")
             result = db.bulk_add_faqs(faqs_data)
         
-        # Auto-sync after upload if any inserts were successful
-        if result['successful'] > 0:
-            print("🔄 Auto-syncing application data...")
-            await sync_data()
-            print("✅ Auto-sync completed")
+        # Note: Data has been added to database. Use /sync endpoint to update application data.
         
         # Determine response status
         if result['successful'] == 0:
@@ -386,7 +380,7 @@ async def upload_csv_file(file: UploadFile = File(...), use_fast_method: bool = 
         
         return UploadCSVResponse(
             status=status,
-            message=f"CSV upload completed. {result['successful']} FAQs added, {result['failed']} failed from {len(faqs_data)} valid entries.",
+            message=f"CSV upload completed. {result['successful']} FAQs added to database, {result['failed']} failed from {len(faqs_data)} valid entries. Use /sync endpoint to update application data.",
             total_processed=total_processed,
             successful_inserts=result['successful'],
             failed_inserts=result['failed'],
@@ -399,6 +393,67 @@ async def upload_csv_file(file: UploadFile = File(...), use_fast_method: bool = 
     except Exception as e:
         print(f"❌ CSV upload failed: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to upload CSV: {str(e)}")
+
+
+@app.get("/user-queries")
+async def get_user_queries(limit: int = 50, approved_only: bool = False):
+    """Get user queries with approval status and confidence scores"""
+    try:
+        # Build query based on filters
+        base_query = """
+        SELECT id, question, answer, approved, confident, created_at 
+        FROM faqs 
+        WHERE category = 'User Query'
+        """
+        
+        if approved_only:
+            base_query += " AND approved = 1"
+        
+        base_query += " ORDER BY created_at DESC"
+        
+        if limit > 0:
+            base_query += f" LIMIT {min(limit, 200)}"  # Cap at 200 for performance
+        
+        result = db.execute_query(base_query, fetch=True)
+        
+        # Format response
+        user_queries = []
+        approved_count = 0
+        pending_count = 0
+        
+        for row in result:
+            query_data = {
+                "id": row['id'],
+                "question": row['question'],
+                "answer": row['answer'][:200] + "..." if len(row['answer']) > 200 else row['answer'],
+                "approved": bool(row['approved']),
+                "confidence_score": float(row['confident']) if row['confident'] else 0.0,
+                "created_at": row['created_at'].isoformat() if row['created_at'] else None,
+                "status": "approved" if row['approved'] == 1 else "pending_review"
+            }
+            user_queries.append(query_data)
+            
+            if row['approved'] == 1:
+                approved_count += 1
+            else:
+                pending_count += 1
+        
+        return {
+            "status": "success",
+            "total_queries": len(user_queries),
+            "approved_count": approved_count,
+            "pending_count": pending_count,
+            "queries": user_queries,
+            "filters": {
+                "limit": limit,
+                "approved_only": approved_only
+            },
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        print(f"❌ Error getting user queries: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get user queries: {str(e)}")
 
 
 @app.get("/data-info")
@@ -557,21 +612,21 @@ async def get_cache_stats():
         "system_info": {
             "logging_queue_size": logging_queue.qsize(),
             "thread_pool_workers": thread_executor._max_workers,
-            "cache_policy": "permanent (no auto-cleanup)"
+            "cache_policy": "no query response caching - fresh synced data only"
         },
         "performance_optimizations": [
-            "Selective caching (quality-based)",
+            "Query response caching disabled - fresh data only",
             "Async logging queue",
-            "Enhanced text caching",
+            "Enhanced text caching for NLP processing",
             "Two-pass similarity search",
             "Increased thread workers",
             "Optimized thresholds",
-            "Lazy vector embeddings"
+            "Lazy vector embeddings from synced data"
         ],
-        "cache_quality_filters": {
-            "similarity_cache_min_threshold": 0.2,
-            "response_cache_min_confidence": 0.2,
-            "high_confidence_always_cached": "≥80% similarity"
+        "cache_policy": {
+            "query_response_caching": "disabled",
+            "knowledge_vector_source": "synced_data_only",
+            "note": "Queries are processed fresh using synced knowledge data"
         },
         "cache_efficiency": {
             "avg_similarity_cache_size_per_entry": format_bytes(similarity_cache_bytes / max(len(similarity_cache), 1)),
@@ -583,12 +638,12 @@ async def get_cache_stats():
 
 @app.post("/clear-cache")
 async def clear_cache():
-    """Clear all caches for fresh performance"""
+    """Clear remaining caches (response cache no longer used for queries)"""
     from src.utils.cache import similarity_cache, processed_text_cache
 
-    # Clear all caches
+    # Clear remaining caches (response cache not used for queries anymore)
     similarity_cache.clear()
-    response_cache.clear()
+    response_cache.clear()  # Keep for compatibility but not used for query responses
     processed_text_cache.clear()
     conversation_contexts.clear()
 
@@ -601,7 +656,7 @@ async def clear_cache():
 
     return {
         "status": "success",
-        "message": "All caches and queues cleared",
+        "message": "All caches cleared (note: query responses are no longer cached - fresh synced data used)",
         "timestamp": datetime.now().isoformat()
     }
 

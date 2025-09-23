@@ -106,6 +106,11 @@ class DatabaseConnection:
         query = "SELECT * FROM faqs ORDER BY id"
         return self.execute_query(query, fetch=True)
     
+    def get_approved_faqs(self):
+        """Get only approved FAQs (approved = 1) for base knowledge"""
+        query = "SELECT * FROM faqs WHERE approved = 1 ORDER BY id"
+        return self.execute_query(query, fetch=True)
+    
     def search_faqs(self, keyword):
         if not keyword or len(keyword.strip()) < 2:
             raise ValueError("Search keyword must be at least 2 characters")
@@ -136,6 +141,46 @@ class DatabaseConnection:
         """
         result = self.execute_query(query, (question, answer, category), fetch=True)
         return result[0]['id'] if result else None
+    
+    def add_user_query(self, question, answer, confidence_score, approved=None, category="User Query"):
+        """
+        Add user query to database with confidence score and approval status
+        
+        Args:
+            question: User's question
+            answer: System's response 
+            confidence_score: Confidence score (0-1)
+            approved: If None, auto-determine based on confidence (>0.79 = 1, <=0.79 = 0)
+            category: Category for the query
+        """
+        if not question or not answer:
+            logger.warning("Skipping user query save: empty question or answer")
+            return None
+        
+        # Auto-determine approval status if not provided
+        if approved is None:
+            approved = 1 if confidence_score > 0.79 else 0
+        
+        # Sanitize inputs
+        question = question.strip()[:500]  # Limit length
+        answer = answer.strip()[:2000]     # Limit length
+        category = category.strip()[:100] if category else "User Query"
+        
+        try:
+            query = """
+            INSERT INTO faqs (question, answer, category, approved, confident) 
+            VALUES (%s, %s, %s, %s, %s) RETURNING id
+            """
+            result = self.execute_query(query, (question, answer, category, approved, confidence_score), fetch=True)
+            
+            status = "approved" if approved == 1 else "pending review"
+            logger.info(f"User query saved (ID: {result[0]['id'] if result else 'unknown'}, Status: {status}, Confidence: {confidence_score:.3f})")
+            
+            return result[0]['id'] if result else None
+            
+        except Exception as e:
+            logger.error(f"Failed to save user query: {e}")
+            return None
     
     def bulk_add_faqs(self, faqs_data):
         """Optimized bulk insert FAQs using batch processing"""

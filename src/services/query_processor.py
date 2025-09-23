@@ -11,7 +11,7 @@ from src.core.nlp.processor import IndonesianNLPProcessor
 from src.core.nlp.conversation import ConversationHandler
 from src.core.nlp.confidence import ConfidenceEvaluator
 from src.services.response_generator import ResponseGenerator
-from src.utils.cache import response_cache
+from src.database.connection import db
 
 # Try to import vector embeddings
 try:
@@ -89,17 +89,10 @@ class EnhancedQueryProcessor:
             self._vector_embeddings_failed = True
 
     async def process_query(self, query: str, conversation_context: Dict = None) -> Dict:
-        """Main query processing with multi-layer approach and performance optimizations"""
+        """Main query processing with multi-layer approach - no query caching"""
         start_time = datetime.now()
 
-        # Check response cache first (LRU cache for better memory management)
-        cache_key = f"query_{hash(query)}"
-        cached_result = response_cache.get(cache_key)
-        if cached_result:
-            cached_result = cached_result.copy()  # Create copy to avoid mutation
-            cached_result['response_time'] = (datetime.now() - start_time).total_seconds()
-            cached_result['cached'] = True
-            return cached_result
+        # Skip query caching - always process fresh using synced knowledge data
 
         # Layer 1: Conversation detection (fastest)
         if self.conversation_handler.is_greeting(query):
@@ -155,8 +148,11 @@ class EnhancedQueryProcessor:
                 'suggestions': [],
                 'response_time': (datetime.now() - start_time).total_seconds()
             }
-            # Always cache high confidence results (≥80% similarity)
-            response_cache[cache_key] = response_data
+            
+            # Save user query to database based on confidence score (async, non-blocking)
+            asyncio.create_task(self._save_user_query_async(query, response_data))
+            
+            # No caching - always use fresh synced data
             return response_data
 
         # Check for exact matches
@@ -173,15 +169,10 @@ class EnhancedQueryProcessor:
 
         response_data['response_time'] = (datetime.now() - start_time).total_seconds()
 
-        # Only cache responses with decent confidence (avoid caching poor/irrelevant responses)
-        confidence_score = response_data.get('confidence_score', 0.0)
-        if confidence_score >= 0.2:  # Only cache if confidence is at least 20%
-            response_cache[cache_key] = response_data
+        # Save user query to database based on confidence score (async, non-blocking)
+        asyncio.create_task(self._save_user_query_async(query, response_data))
 
-            # LRU cache automatically manages size, no need for manual cleanup
-            if len(response_cache) > 4000:  # Only warn at higher threshold
-                print(f"ℹ️  Response cache growing ({len(response_cache)} entries) - LRU cleanup active")
-
+        # No query response caching - always use fresh synced knowledge data
         return response_data
 
     async def _ensure_vector_embeddings_async(self) -> bool:
@@ -397,46 +388,8 @@ class EnhancedQueryProcessor:
         return unique_results
 
     async def pre_cache_popular_queries(self) -> None:
-        """Pre-cache responses for popular/common queries"""
-        try:
-            print("🔥 Pre-caching popular queries...")
-
-            # Define popular queries based on common user needs
-            popular_queries = [
-                "cara mendaftar sentuh tanahku",
-                "apa itu sentuh tanahku",
-                "bagaimana cek sertifikat tanah",
-                "syarat pendaftaran tanah",
-                "cara menggunakan aplikasi",
-                "fitur utama sentuh tanahku",
-                "biaya pendaftaran tanah",
-                "dokumen yang diperlukan",
-                "cara cek status permohonan",
-                "alamat kantor pertanahan",
-                "jam operasional pelayanan",
-                "kontak customer service",
-                "cara download sertifikat",
-                "proses penerbitan sertifikat",
-                "masa berlaku sertifikat"
-            ]
-
-            cached_count = 0
-            for query in popular_queries:
-                try:
-                    # Pre-cache the query
-                    await self.process_query(query)
-                    cached_count += 1
-
-                    # Small delay to avoid overwhelming the system
-                    await asyncio.sleep(0.1)
-
-                except Exception as e:
-                    print(f"⚠️ Failed to pre-cache query '{query}': {e}")
-
-            print(f"✅ Pre-cached {cached_count}/{len(popular_queries)} popular queries")
-
-        except Exception as e:
-            print(f"❌ Pre-caching failed: {e}")
+        """Pre-caching disabled - system now uses fresh synced data only"""
+        print("ℹ️ Pre-caching disabled - system uses fresh synced knowledge data for all queries")
 
     async def process_query_stream(self, query: str, conversation_context: Dict = None) -> AsyncGenerator[str, None]:
         """Process query with streaming response"""
@@ -469,3 +422,41 @@ class EnhancedQueryProcessor:
             yield f"data: {{\"type\": \"sources\", \"sources\": {sources_json}}}\n\n"
 
         yield "data: {\"type\": \"done\"}\n\n"
+
+    async def _save_user_query_async(self, query: str, response_data: Dict) -> None:
+        """
+        Save user query to database asynchronously based on confidence score
+        
+        Args:
+            query: User's original question
+            response_data: Response data containing confidence score and answer
+        """
+        try:
+            # Skip saving for greeting/goodbye responses (not actual FAQ content)
+            response_type = response_data.get('response_type', '')
+            if response_type in ['greeting', 'goodbye']:
+                return
+            
+            # Extract data for saving
+            confidence_score = response_data.get('confidence_score', 0.0)
+            answer = response_data.get('response', '')
+            
+            # Skip if no meaningful content
+            if not query.strip() or not answer.strip():
+                return
+            
+            # Skip if confidence is exactly 1.0 (likely system generated response)
+            if confidence_score == 1.0 and response_type in ['greeting', 'goodbye']:
+                return
+            
+            # Save to database in background thread to avoid blocking
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                thread_executor,
+                lambda: db.add_user_query(query, answer, confidence_score)
+            )
+            
+        except Exception as e:
+            # Log error but don't fail the main response
+            print(f"⚠️ Failed to save user query: {e}")
+            # Could add proper logging here if needed
